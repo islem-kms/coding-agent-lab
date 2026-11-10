@@ -7,6 +7,7 @@ import sys
 from typing import Any
 
 import bootstrap
+from adapters.research.github_research import ResearchError
 from core.repair_service import InvalidSelection
 
 MAX_PRINTED_LINES = 12
@@ -57,6 +58,8 @@ def build_parser() -> argparse.ArgumentParser:
         command.add_argument("--model", default=None,
                              help="Ollama model (default: $OLLAMA_MODEL or qwen2.5-coder:7b).")
         command.add_argument("--temperature", type=float, default=0.0, help="Ollama sampling temperature.")
+    repair.add_argument("--research", action="store_true",
+                        help="Allow bounded public GitHub code search (needs GITHUB_TOKEN).")
     return parser
 
 
@@ -70,9 +73,14 @@ def main(argv: list[str] | None = None) -> int:
                port=args.port)
         return 0
 
-    service = bootstrap.build_service(
-        args.provider, on_event=print_event, model=args.model, temperature=args.temperature,
-    )
+    try:
+        service = bootstrap.build_service(
+            args.provider, on_event=print_event, model=args.model,
+            temperature=args.temperature, research=args.research,
+        )
+    except ResearchError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     try:
         result = service.repair(args.project)
     except InvalidSelection as exc:

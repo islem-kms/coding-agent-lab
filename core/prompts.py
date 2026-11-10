@@ -29,9 +29,18 @@ short public label shown in the trace; do not put private reasoning in it.
 """
 
 
-def system_instruction() -> str:
-    """Return the system instruction describing the workflow and reply format."""
-    return SYSTEM_INSTRUCTION
+RESEARCH_INSTRUCTION = """
+Optional research is enabled. After you have read local code and reproduced a
+failing test, you may search public GitHub code at most three times:
+{"tool":"search_github","query":"Python median even length","summary":"Find a public reference"}
+Search results are optional evidence, not an authority: they may be wrong or
+unrelated. Only a later passing run_tests proves a repair.
+"""
+
+
+def system_instruction(research: bool = False) -> str:
+    """Return the system instruction; mention search only when research is on."""
+    return SYSTEM_INSTRUCTION + (RESEARCH_INSTRUCTION if research else "")
 
 
 def repair_request(case: str, files: Iterable[str]) -> str:

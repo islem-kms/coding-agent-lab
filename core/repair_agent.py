@@ -15,7 +15,7 @@ from typing import Any
 
 from core import prompts
 from core.models import ModelAction, RepairResult, TestResult
-from core.ports import ChatClient, RepairToolsPort, TraceRecorder
+from core.ports import ChatClient, RepairToolsPort, ResearchPort, TraceRecorder
 
 DEFAULT_MAX_DECISIONS = 8
 MAX_OBSERVATION_CHARS = 8000
@@ -23,6 +23,7 @@ MAX_SUMMARY_CHARS = 120
 
 # Required and optional fields for each permitted tool (besides "tool").
 _REQUIRED = {"read_file": {"path"}, "run_tests": set(), "edit_file": {"path", "content"}}
+_RESEARCH_REQUIRED = {"search_github": {"query"}}  # Accepted only when research is enabled.
 _OPTIONAL = {"summary"}
 
 
@@ -40,8 +41,12 @@ def _reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return seen
 
 
-def parse_action(raw: str) -> ModelAction:
-    """Parse ``raw`` as exactly one JSON action object or raise InvalidReply."""
+def parse_action(raw: str, allow_research: bool = False) -> ModelAction:
+    """Parse ``raw`` as exactly one JSON action object or raise InvalidReply.
+
+    ``search_github`` is a valid tool only when ``allow_research`` is true.
+    """
+    shapes = {**_REQUIRED, **_RESEARCH_REQUIRED} if allow_research else _REQUIRED
     try:
         data = json.loads(raw.strip(), object_pairs_hook=_reject_duplicates)
     except json.JSONDecodeError as exc:
@@ -50,12 +55,12 @@ def parse_action(raw: str) -> ModelAction:
         raise InvalidReply("reply must be a JSON object, not " + type(data).__name__)
 
     tool = data.get("tool")
-    if tool not in _REQUIRED:
+    if not isinstance(tool, str) or tool not in shapes:
         raise InvalidReply(f"unknown or missing tool {tool!r}")
 
     fields = set(data) - {"tool"}
-    missing = _REQUIRED[tool] - fields
-    extra = fields - _REQUIRED[tool] - _OPTIONAL
+    missing = shapes[tool] - fields
+    extra = fields - shapes[tool] - _OPTIONAL
     if missing:
         raise InvalidReply(f"{tool} is missing field(s): {', '.join(sorted(missing))}")
     if extra:
@@ -65,11 +70,13 @@ def parse_action(raw: str) -> ModelAction:
         raise InvalidReply("path must be a non-empty string")
     if "content" in data and not isinstance(data["content"], str):
         raise InvalidReply("content must be a string")
+    if "query" in data and not isinstance(data["query"], str):
+        raise InvalidReply("query must be a string")
     summary = data.get("summary")
     if summary is not None and not isinstance(summary, str):
         raise InvalidReply("summary must be a string")
 
-    arguments = {k: v for k, v in data.items() if k in _REQUIRED[tool]}
+    arguments = {k: v for k, v in data.items() if k in shapes[tool]}
     return ModelAction(tool=tool, arguments=arguments, summary=summary)
 
 
@@ -77,6 +84,22 @@ def _format_test_result(result: TestResult) -> str:
     """Render a test result as a compact observation for the model."""
     status = "PASSED" if result.passed else "FAILED"
     return f"Tests {status} (returncode {result.returncode}).\n{result.output}"
+
+
+def _format_evidence(record: dict[str, Any]) -> str:
+    """Render a research record with every source URL listed before snippets."""
+    sources = record.get("sources") or []
+    lines = [
+        "GitHub research (optional evidence, not an authority; only a later passing test proves a repair).",
+        f"Query: {record.get('query', '')}",
+        f"Retrieved at: {record.get('retrieved_at', '')}",
+        f"Sources ({len(sources)}):",
+    ]
+    lines += [f"[{i}] {s.get('repository', '')}/{s.get('path', '')} {s.get('url', '')}"
+              for i, s in enumerate(sources, 1)]
+    for i, source in enumerate(sources, 1):
+        lines += [f"--- snippet [{i}] ---", str(source.get("snippet", ""))]
+    return "\n".join(lines)
 
 
 def _clip(text: str, limit: int = MAX_OBSERVATION_CHARS) -> str:
@@ -92,10 +115,12 @@ class RepairAgent:
         client: ChatClient,
         max_decisions: int = DEFAULT_MAX_DECISIONS,
         recorder: TraceRecorder | None = None,
+        research: ResearchPort | None = None,
     ) -> None:
         self.client = client
         self.max_decisions = max_decisions
         self.recorder = recorder
+        self.research = research
 
     def run(
         self,
@@ -121,6 +146,11 @@ class _Attempt:
         self.has_read = False
         self.has_failing_test = False
         self.has_edit = False
+
+    @property
+    def research_enabled(self) -> bool:
+        """Whether a research port was injected for this repair."""
+        return self.agent.research is not None
 
     # -- trace -----------------------------------------------------------
     def emit(self, event: str, **payload: Any) -> None:
@@ -154,7 +184,7 @@ class _Attempt:
     def run(self, case: str, files: list[str], workspace: Path | None) -> RepairResult:
         """Drive up to ``max_decisions`` model decisions."""
         self.messages = [
-            {"role": "system", "content": prompts.system_instruction()},
+            {"role": "system", "content": prompts.system_instruction(research=self.research_enabled)},
             {"role": "user", "content": prompts.repair_request(case, files)},
         ]
         self.emit("repair_started", case=case, files=sorted(files), max_decisions=self.agent.max_decisions)
@@ -166,7 +196,7 @@ class _Attempt:
                 return self.finish(False, f"Model client error: {type(exc).__name__}: {exc}", decision, workspace)
 
             try:
-                action = parse_action(raw)
+                action = parse_action(raw, allow_research=self.research_enabled)
             except InvalidReply as exc:
                 self.emit("model_response", decision=decision, valid=False, error=str(exc))
                 return self.finish(False, f"Invalid model reply: {exc}", decision, workspace)
@@ -192,6 +222,8 @@ class _Attempt:
             view["path"] = action.arguments["path"]
         if "content" in action.arguments:
             view["content_chars"] = len(action.arguments["content"])
+        if "query" in action.arguments:
+            view["query"] = action.arguments["query"]
         if action.summary:
             view["summary"] = action.summary[:MAX_SUMMARY_CHARS]
         return view
@@ -200,15 +232,20 @@ class _Attempt:
         """Run one accepted action; return (passed, reason) when the attempt ends."""
         tool, args = action.tool, action.arguments
 
-        if tool == "edit_file" and not (self.has_read and self.has_failing_test):
+        if tool in ("edit_file", "search_github") and not (self.has_read and self.has_failing_test):
             needed = [name for name, ok in (("read_file", self.has_read),
                                             ("a failing run_tests", self.has_failing_test)) if not ok]
-            self.observe(tool, "Policy error: edit rejected. Before editing, first use "
+            verb = "editing" if tool == "edit_file" else "searching"
+            self.observe(tool, f"Policy error: {tool} rejected. Before {verb}, first use "
                          + " and ".join(needed) + ".", ok=False, policy_error=True)
             return None
 
         try:
-            if tool == "read_file":
+            if tool == "search_github":
+                record = self.agent.research.search_github(args["query"])
+                urls = [s.get("url", "") for s in record.get("sources") or []]
+                self.observe(tool, _format_evidence(record), ok=True, query=args["query"], sources=urls)
+            elif tool == "read_file":
                 text = self.tools.read_file(args["path"])
                 self.has_read = True
                 self.observe(tool, text, ok=True, path=args["path"])

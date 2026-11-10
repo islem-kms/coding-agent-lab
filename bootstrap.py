@@ -12,6 +12,7 @@ from typing import Any
 
 from adapters.models.ollama import OllamaClient
 from adapters.models.scripted import ScriptedClient
+from adapters.research.github_research import GitHubResearch
 from adapters.sandbox import runner
 from adapters.sandbox.repair_tools import RepairTools
 from core.ports import ChatClient
@@ -122,14 +123,22 @@ def build_service(
     on_event: EventCallback | None = None,
     model: str | None = None,
     temperature: float = 0.0,
+    research: bool = False,
 ) -> RepairService:
-    """Wire the runner, safe tools, chat client and agent into a RepairService."""
+    """Wire the runner, safe tools, chat client and agent into a RepairService.
+
+    GitHub research is constructed only when ``research`` is true; the token is
+    read from ``GITHUB_TOKEN`` here, at composition time.
+    """
     if provider not in PROVIDERS:
         raise ValueError(f"Unknown provider: {provider}. Choose one of: {', '.join(PROVIDERS)}")
     recorder = CallbackRecorder(on_event) if on_event else None
+    token = GitHubResearch.token_from_environment() if research else None
 
     def make_agent(case: str) -> RepairAgent:
-        return RepairAgent(make_client(provider, case, model, temperature), recorder=recorder)
+        # A fresh adapter per repair gives each repair its own search budget.
+        port = GitHubResearch(token) if token else None
+        return RepairAgent(make_client(provider, case, model, temperature), recorder=recorder, research=port)
 
     return RepairService(
         evals_dir=runner.EVALS_DIR,

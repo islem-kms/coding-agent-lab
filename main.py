@@ -50,10 +50,13 @@ def build_parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
     repair = commands.add_parser("repair", help="Repair one supplied project under evals/.")
     repair.add_argument("project", help="Selected project, for example evals/arithmetic.")
-    repair.add_argument("--provider", choices=bootstrap.PROVIDERS, default="scripted")
     ui = commands.add_parser("ui", help="Start the local Gradio page.")
-    ui.add_argument("--provider", choices=bootstrap.PROVIDERS, default="scripted")
     ui.add_argument("--port", type=int, default=7860)
+    for command in (repair, ui):
+        command.add_argument("--provider", choices=bootstrap.PROVIDERS, default="scripted")
+        command.add_argument("--model", default=None,
+                             help="Ollama model (default: $OLLAMA_MODEL or qwen2.5-coder:7b).")
+        command.add_argument("--temperature", type=float, default=0.0, help="Ollama sampling temperature.")
     return parser
 
 
@@ -63,10 +66,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "ui":
         from adapters.gradio_ui import launch
 
-        launch(bootstrap.build_service(args.provider), port=args.port)
+        launch(bootstrap.build_service(args.provider, model=args.model, temperature=args.temperature),
+               port=args.port)
         return 0
 
-    service = bootstrap.build_service(args.provider, on_event=print_event)
+    service = bootstrap.build_service(
+        args.provider, on_event=print_event, model=args.model, temperature=args.temperature,
+    )
     try:
         result = service.repair(args.project)
     except InvalidSelection as exc:

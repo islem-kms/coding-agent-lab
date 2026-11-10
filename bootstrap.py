@@ -10,6 +10,7 @@ import json
 from collections.abc import Callable
 from typing import Any
 
+from adapters.models.ollama import OllamaClient
 from adapters.models.scripted import ScriptedClient
 from adapters.sandbox import runner
 from adapters.sandbox.repair_tools import RepairTools
@@ -17,7 +18,7 @@ from core.ports import ChatClient
 from core.repair_agent import RepairAgent
 from core.repair_service import RepairService
 
-PROVIDERS = ("scripted",)
+PROVIDERS = ("scripted", "ollama")
 
 EventCallback = Callable[[str, dict[str, Any]], None]
 
@@ -105,23 +106,30 @@ class CallbackRecorder:
         self._callback(event, payload)
 
 
-def make_client(provider: str, case: str) -> ChatClient:
+def make_client(provider: str, case: str, model: str | None = None, temperature: float = 0.0) -> ChatClient:
     """Create the chat client for ``provider`` and the selected case."""
     if provider == "scripted":
         if case not in SCRIPTED_REPLIES:
             raise ValueError(f"No scripted answer cards for case: {case}")
         return ScriptedClient(SCRIPTED_REPLIES[case])
+    if provider == "ollama":
+        return OllamaClient(model=model, temperature=temperature)
     raise ValueError(f"Unknown provider: {provider}. Choose one of: {', '.join(PROVIDERS)}")
 
 
-def build_service(provider: str, on_event: EventCallback | None = None) -> RepairService:
+def build_service(
+    provider: str,
+    on_event: EventCallback | None = None,
+    model: str | None = None,
+    temperature: float = 0.0,
+) -> RepairService:
     """Wire the runner, safe tools, chat client and agent into a RepairService."""
     if provider not in PROVIDERS:
         raise ValueError(f"Unknown provider: {provider}. Choose one of: {', '.join(PROVIDERS)}")
     recorder = CallbackRecorder(on_event) if on_event else None
 
     def make_agent(case: str) -> RepairAgent:
-        return RepairAgent(make_client(provider, case), recorder=recorder)
+        return RepairAgent(make_client(provider, case, model, temperature), recorder=recorder)
 
     return RepairService(
         evals_dir=runner.EVALS_DIR,

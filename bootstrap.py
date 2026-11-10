@@ -12,10 +12,12 @@ from typing import Any
 
 from adapters.models.ollama import OllamaClient
 from adapters.models.scripted import ScriptedClient
+from adapters.observability.langfuse import LangfuseTrajectoryRecorder
+from adapters.observability.langfuse import create_client as create_langfuse_client
 from adapters.research.github_research import GitHubResearch
 from adapters.sandbox import runner
 from adapters.sandbox.repair_tools import RepairTools
-from core.ports import ChatClient
+from core.ports import ChatClient, TraceRecorder
 from core.repair_agent import RepairAgent
 from core.repair_service import RepairService
 
@@ -107,6 +109,18 @@ class CallbackRecorder:
         self._callback(event, payload)
 
 
+class FanOutRecorder:
+    """TraceRecorder that forwards each event to several recorders in order."""
+
+    def __init__(self, *recorders: TraceRecorder) -> None:
+        self._recorders = recorders
+
+    def record(self, event: str, payload: dict[str, Any]) -> None:
+        """Forward one trace event to every recorder."""
+        for recorder in self._recorders:
+            recorder.record(event, payload)
+
+
 def make_client(provider: str, case: str, model: str | None = None, temperature: float = 0.0) -> ChatClient:
     """Create the chat client for ``provider`` and the selected case."""
     if provider == "scripted":
@@ -124,15 +138,22 @@ def build_service(
     model: str | None = None,
     temperature: float = 0.0,
     research: bool = False,
+    observe: bool = False,
 ) -> RepairService:
     """Wire the runner, safe tools, chat client and agent into a RepairService.
 
-    GitHub research is constructed only when ``research`` is true; the token is
-    read from ``GITHUB_TOKEN`` here, at composition time.
+    GitHub research and Langfuse observation are constructed only when their
+    flags are true; their credentials are read from the environment here, at
+    composition time, so a missing variable fails before any repair starts.
     """
     if provider not in PROVIDERS:
         raise ValueError(f"Unknown provider: {provider}. Choose one of: {', '.join(PROVIDERS)}")
-    recorder = CallbackRecorder(on_event) if on_event else None
+    recorders: list[TraceRecorder] = []
+    if on_event:
+        recorders.append(CallbackRecorder(on_event))
+    if observe:
+        recorders.append(LangfuseTrajectoryRecorder(create_langfuse_client()))
+    recorder = recorders[0] if len(recorders) == 1 else (FanOutRecorder(*recorders) if recorders else None)
     token = GitHubResearch.token_from_environment() if research else None
 
     def make_agent(case: str) -> RepairAgent:

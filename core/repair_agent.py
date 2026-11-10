@@ -9,6 +9,7 @@ to the model. It depends only on ``core`` interfaces, never on adapters.
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Iterable
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -16,6 +17,8 @@ from typing import Any
 from core import prompts
 from core.models import ModelAction, RepairResult, TestResult
 from core.ports import ChatClient, RepairToolsPort, ResearchPort, TraceRecorder
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_MAX_DECISIONS = 8
 MAX_OBSERVATION_CHARS = 8000
@@ -160,11 +163,12 @@ class _Attempt:
             try:
                 self.agent.recorder.record(event, payload)
             except Exception:  # A recorder must never change the repair outcome.
-                pass
+                logger.warning("Trace recorder failed for %s; the repair continues.", event, exc_info=True)
 
     def finish(self, passed: bool, reason: str, decisions: int, workspace: Path | None) -> RepairResult:
         """Record ``repair_finished`` and build the final result."""
-        self.emit("repair_finished", passed=passed, reason=reason, decisions=decisions)
+        self.emit("repair_finished", passed=passed, reason=reason, decisions=decisions,
+                  changed_files=list(self.changed_files))
         return RepairResult(
             passed=passed,
             trace=self.trace,

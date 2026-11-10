@@ -7,6 +7,7 @@ import sys
 from typing import Any
 
 import bootstrap
+from adapters.observability.langfuse import ObservabilityConfigError
 from adapters.research.github_research import ResearchError
 from core.repair_service import InvalidSelection
 
@@ -60,6 +61,9 @@ def build_parser() -> argparse.ArgumentParser:
         command.add_argument("--temperature", type=float, default=0.0, help="Ollama sampling temperature.")
     repair.add_argument("--research", action="store_true",
                         help="Allow bounded public GitHub code search (needs GITHUB_TOKEN).")
+    repair.add_argument("--observe", action="store_true",
+                        help="Record a small public trajectory in Langfuse Cloud "
+                             "(needs LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY, LANGFUSE_BASE_URL).")
     return parser
 
 
@@ -76,9 +80,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         service = bootstrap.build_service(
             args.provider, on_event=print_event, model=args.model,
-            temperature=args.temperature, research=args.research,
+            temperature=args.temperature, research=args.research, observe=args.observe,
         )
-    except ResearchError as exc:
+    except (ResearchError, ObservabilityConfigError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     try:

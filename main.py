@@ -51,12 +51,21 @@ def build_parser() -> argparse.ArgumentParser:
     repair = commands.add_parser("repair", help="Repair one supplied project under evals/.")
     repair.add_argument("project", help="Selected project, for example evals/arithmetic.")
     repair.add_argument("--provider", choices=bootstrap.PROVIDERS, default="scripted")
+    ui = commands.add_parser("ui", help="Start the local Gradio page.")
+    ui.add_argument("--provider", choices=bootstrap.PROVIDERS, default="scripted")
+    ui.add_argument("--port", type=int, default=7860)
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     """Run the CLI and return the process exit status."""
     args = build_parser().parse_args(argv)
+    if args.command == "ui":
+        from adapters.gradio_ui import launch
+
+        launch(bootstrap.build_service(args.provider), port=args.port)
+        return 0
+
     service = bootstrap.build_service(args.provider, on_event=print_event)
     try:
         result = service.repair(args.project)
